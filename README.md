@@ -12,10 +12,32 @@ so the device powers on straight into the tiles.
 |-------|--------|
 | D-pad | move the selection (green border) |
 | OK twice | full screen the selected tile |
-| BACK | return to the grid (ignored in the grid — this is the HOME app) |
-| OK long-press | actions: full screen, mute/unmute, open lock |
+| BACK | leave full screen; in the grid, leave the app |
+| OK long-press | actions: full screen, mute/unmute, open lock, move, exit |
 
 The Chromecast remote has no MENU or colour buttons, so long-press OK carries the menu.
+
+**Move** puts the tile in an amber border labelled `↔ moving`; the D-pad then swaps it with
+its neighbour and OK or BACK confirms. The arrangement is stored in SharedPreferences by
+camera *name*, deliberately not written back to `cameras.json` — pushing a new config must
+not clobber the layout, and a file holding gate credentials should not be app-writable.
+Renaming a camera drops it to the end of the grid.
+
+BACK must be able to exit: the wall is started by `BootReceiver` and sits on top of the
+Google TV launcher, so swallowing BACK strands anyone whose HOME button does not work.
+
+## Virtual remote
+
+`tools/tvremote.py` drives the device over `_androidtvremote2._tcp` (port 6466) — the same
+protocol the Google TV phone remote uses. Useful when a physical button dies, and to reach
+Settings when ADB is off (which it will be after every reboot).
+
+    ./.venv/bin/python tools/tvremote.py pair        # once; type the code shown on the TV
+    ./.venv/bin/python tools/tvremote.py key HOME
+    ./.venv/bin/python tools/tvremote.py key BACK DPAD_DOWN DPAD_CENTER
+
+Certificates are written next to the script and survive reboots, so unlike ADB this is a
+one-time setup. Install with `python -m venv .venv && .venv/bin/pip install androidtvremote2`.
 
 ## Why TextureView and not SurfaceView
 
@@ -74,7 +96,16 @@ It prints a ready-made `cameras.json`. Entries take two optional fields:
 `audio` defaults to false — four live audio streams at once is not useful; unmute per
 tile from the menu instead (unmuted tiles show a musical note by their name). `unlock`
 adds an **Open lock** menu entry, behind a confirmation because a door release is
-one-way. Digest auth is handled by `HttpURLConnection`; any vendor's relay URL works.
+one-way. Any vendor's relay URL works.
+
+Digest auth is implemented in `Unlocker.kt` rather than delegated: Android's
+`HttpURLConnection` is backed by OkHttp, **which dropped Digest support**, so
+`java.net.Authenticator` only ever answers Basic — and these VTOs reject Basic with a
+flat 401, so the platform path throws `IOException` before authenticating. The header form
+follows github.com/khaledez/camonitor `digest.go`: parameter order mirroring
+`curl --digest`, `qop`/`nc` unquoted, and **no `algorithm` parameter**. A camera given the
+wrong form answers `401 Invalid Authority!`, which reads like a permissions problem but is
+an auth-response mismatch.
 
 The two Dahua units here are DHI-VTO3311Q-WP door stations, which answer
 `accessControl.cgi`; `?action=getDoorStatus&channel=1` reports lock state without

@@ -2,6 +2,7 @@ package net.khaledez.camwall
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -55,8 +56,8 @@ class MainActivity : Activity() {
         lateinit var cell: FrameLayout
         lateinit var texture: TextureView
         lateinit var label: TextView
-        lateinit var rowSpec: GridLayout.Spec
-        lateinit var colSpec: GridLayout.Spec
+        var row = 0
+        var col = 0
 
         var player: ExoPlayer? = null
         var muted = !camera.audio
@@ -105,8 +106,11 @@ class MainActivity : Activity() {
         }
 
         fun setLabel(text: String) {
-            label.text = if (muted) text else "$text  ♪"
+            val moving = if (this === movingTile) "  ↔ moving" else ""
+            label.text = (if (muted) text else "$text  ♪") + moving
         }
+
+        fun refreshLabel() = setLabel(camera.name)
 
         fun toggleMute(): Boolean {
             muted = !muted
@@ -138,6 +142,7 @@ class MainActivity : Activity() {
     private var fullscreenIndex = -1
     private var lastCenterUp = 0L
     private var longPressFired = false
+    private var movingTile: Tile? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -145,7 +150,7 @@ class MainActivity : Activity() {
         setContentView(R.layout.activity_main)
         hideSystemUi()
 
-        val cameras = CameraConfig.load(this)
+        val cameras = orderedCameras(CameraConfig.load(this))
         cols = ceil(sqrt(cameras.size.toDouble())).toInt().coerceAtLeast(1)
         rows = ceil(cameras.size / cols.toDouble()).toInt().coerceAtLeast(1)
 
@@ -185,13 +190,19 @@ class MainActivity : Activity() {
                     )
                 )
                 setOnFocusChangeListener { v, hasFocus ->
-                    v.foreground = if (hasFocus) selectionBorder() else null
+                    v.foreground = when {
+                        tile === movingTile -> selectionBorder(moving = true)
+                        hasFocus -> selectionBorder()
+                        else -> null
+                    }
                 }
             }
 
-            tile.rowSpec = GridLayout.spec(i / cols, 1, 1f)
-            tile.colSpec = GridLayout.spec(i % cols, 1, 1f)
-            val params = GridLayout.LayoutParams(tile.rowSpec, tile.colSpec).apply {
+            tile.row = i / cols
+            tile.col = i % cols
+            val params = GridLayout.LayoutParams(
+                GridLayout.spec(tile.row, 1, 1f), GridLayout.spec(tile.col, 1, 1f)
+            ).apply {
                 width = 0
                 height = 0
                 setMargins(2, 2, 2, 2)
@@ -211,9 +222,70 @@ class MainActivity : Activity() {
         Log.i(TAG, "wall built: ${cameras.size} cameras in ${rows}x$cols")
     }
 
-    private fun selectionBorder() = GradientDrawable().apply {
-        setStroke(4, Color.parseColor("#3DDC84"))
+    private fun selectionBorder(moving: Boolean = false) = GradientDrawable().apply {
+        setStroke(if (moving) 6 else 4, Color.parseColor(if (moving) "#FFB300" else "#3DDC84"))
         setColor(Color.TRANSPARENT)
+    }
+
+    // ---- tile order --------------------------------------------------------
+
+    private fun prefs() = getSharedPreferences("layout", Context.MODE_PRIVATE)
+
+    /** Saved order is a list of camera names; anything unknown falls to the end. */
+    private fun orderedCameras(cameras: List<Camera>): List<Camera> {
+        val saved = prefs().getString("order", null)?.split("\n")?.filter { it.isNotEmpty() }
+            ?: return cameras
+        return cameras.sortedBy { c ->
+            saved.indexOf(c.name).let { if (it < 0) Int.MAX_VALUE else it }
+        }
+    }
+
+    private fun saveOrder() {
+        val order = tiles.sortedWith(compareBy({ it.row }, { it.col })).map { it.camera.name }
+        prefs().edit().putString("order", order.joinToString("\n")).apply()
+        Log.i(TAG, "layout saved: ${order.joinToString(", ")}")
+    }
+
+    private fun applyPosition(tile: Tile) {
+        val lp = tile.cell.layoutParams as GridLayout.LayoutParams
+        lp.rowSpec = GridLayout.spec(tile.row, 1, 1f)
+        lp.columnSpec = GridLayout.spec(tile.col, 1, 1f)
+        tile.cell.layoutParams = lp
+    }
+
+    // ---- move mode ---------------------------------------------------------
+
+    private fun startMove(tile: Tile) {
+        movingTile = tile
+        tile.cell.foreground = selectionBorder(moving = true)
+        tile.refreshLabel()
+        toast("Move ${tile.camera.name} with the D-pad, OK or BACK when done")
+    }
+
+    private fun endMove() {
+        val tile = movingTile ?: return
+        movingTile = null
+        tile.cell.foreground = if (tile.cell.hasFocus()) selectionBorder() else null
+        tile.refreshLabel()
+        saveOrder()
+    }
+
+    /** Swaps the moving tile with whatever occupies the neighbouring cell. */
+    private fun moveBy(dRow: Int, dCol: Int): Boolean {
+        val tile = movingTile ?: return false
+        val targetRow = tile.row + dRow
+        val targetCol = tile.col + dCol
+        if (targetRow !in 0 until rows || targetCol !in 0 until cols) return true
+        val other = tiles.firstOrNull { it.row == targetRow && it.col == targetCol } ?: return true
+
+        val r = tile.row; val c = tile.col
+        tile.row = other.row; tile.col = other.col
+        other.row = r; other.col = c
+        applyPosition(tile)
+        applyPosition(other)
+        // Layout runs after this pass; keep the selection on the tile being moved.
+        tile.cell.post { tile.cell.requestFocus() }
+        return true
     }
 
     private fun focusedTile(): Tile? = tiles.firstOrNull { it.cell.hasFocus() }
@@ -233,10 +305,7 @@ class MainActivity : Activity() {
 
     private fun exitFullscreen() {
         val tile = tiles.getOrNull(fullscreenIndex) ?: return
-        val lp = tile.cell.layoutParams as GridLayout.LayoutParams
-        lp.rowSpec = tile.rowSpec
-        lp.columnSpec = tile.colSpec
-        tile.cell.layoutParams = lp
+        applyPosition(tile)
         tiles.forEach { it.cell.visibility = View.VISIBLE }
         fullscreenIndex = -1
         tile.cell.requestFocus()
@@ -262,6 +331,12 @@ class MainActivity : Activity() {
             labels.add("Open lock")
             actions.add { confirmUnlock(tile, unlock) }
         }
+
+        labels.add("Move")
+        actions.add { startMove(tile) }
+
+        labels.add("Exit to Google TV")
+        actions.add { finish() }
 
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle(tile.camera.name)
@@ -291,6 +366,14 @@ class MainActivity : Activity() {
             keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (movingTile != null) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_UP -> return moveBy(-1, 0)
+                KeyEvent.KEYCODE_DPAD_DOWN -> return moveBy(1, 0)
+                KeyEvent.KEYCODE_DPAD_LEFT -> return moveBy(0, -1)
+                KeyEvent.KEYCODE_DPAD_RIGHT -> return moveBy(0, 1)
+            }
+        }
         if (isCenter(keyCode)) {
             if (event.repeatCount == 0) {
                 event.startTracking()
@@ -311,6 +394,12 @@ class MainActivity : Activity() {
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (isCenter(keyCode) && movingTile != null) {
+            endMove()
+            longPressFired = false
+            lastCenterUp = 0L
+            return true
+        }
         if (isCenter(keyCode)) {
             if (longPressFired) {
                 longPressFired = false
@@ -330,9 +419,17 @@ class MainActivity : Activity() {
         return super.onKeyUp(keyCode, event)
     }
 
-    /** In the grid there is nothing to go back to; this is the HOME activity. */
+    /**
+     * Full screen -> grid -> leave the app. The wall is started by BootReceiver and sits on
+     * top of the Google TV launcher, so BACK must be able to get out: swallowing it strands
+     * anyone whose remote has no working HOME button.
+     */
     override fun onBackPressed() {
-        if (fullscreenIndex >= 0) exitFullscreen()
+        when {
+            movingTile != null -> endMove()
+            fullscreenIndex >= 0 -> exitFullscreen()
+            else -> finish()
+        }
     }
 
     // ---- lifecycle ---------------------------------------------------------

@@ -3,3 +3,5 @@ cameras.json
 build/
 local.properties
 *.apk
+tools/.tvremote_*.pem
+.venv/
