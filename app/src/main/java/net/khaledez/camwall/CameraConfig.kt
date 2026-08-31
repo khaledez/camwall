@@ -13,6 +13,14 @@ data class Camera(
     val url: String,
     /** Start unmuted. Default false — four live audio streams at once is not useful. */
     val audio: Boolean = false,
+    /**
+     * Interleave RTP over the RTSP TCP connection. Default true: cameras that refuse UDP
+     * need it, and it costs nothing on the ones that don't. Set false to use UDP, which
+     * avoids Media3's unbounded RTSP line parser — the source of the OOM documented in
+     * CrashRestart — at the cost of UDP's own packet loss. Media3 falls back to TCP by
+     * itself if UDP setup fails.
+     */
+    val tcp: Boolean = true,
     val unlock: Unlock? = null
 )
 
@@ -58,6 +66,7 @@ object CameraConfig {
                         name = o.optString("name", "Cam ${i + 1}"),
                         url = o.getString("url"),
                         audio = o.optBoolean("audio", false),
+                        tcp = o.optBoolean("tcp", true),
                         unlock = u
                     )
                 )

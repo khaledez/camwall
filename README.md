@@ -176,6 +176,44 @@ Total decoder load: 2x h264 720p + 2x hevc 1408x528, comfortably inside the S905
     ./tools/deploy.sh <dev> --autostart  # also start the wall on boot
     ./tools/deploy.sh <dev> --restore    # undo autostart
 
+## The OOM crash, and why the app restarts itself
+
+Observed after ~2h of normal running: the process died with
+
+    FATAL EXCEPTION: ExoPlayer:Playback
+    java.lang.OutOfMemoryError: Failed to allocate a 64 byte allocation with 398808 free
+    bytes and 389KB until OOM, target footprint 268435456 ... at MediaCodec.getInputBuffer
+
+with `LoadTask: OutOfMemory error loading stream` in `RtspMessageChannel$Receiver
+.handleInterleavedBinaryData` and `RtpPacket.parse`.
+
+This is not a leak in this app — steady-state heap sits at ~6 MB of 12 MB and GC keeps it
+flat. It is Media3's RTSP receiver. `Receiver.load()` reads one byte, and anything that is
+not the `$` interleave marker is treated as the start of an RTSP *text* message:
+
+    // RtspMessageChannel.parseNextLine
+    while (peekedBytes[0] != Ascii.CR || peekedBytes[1] != Ascii.LF) {
+      peekedBytes[1] = dataInputStream.readByte();
+      messageByteStream.write(peekedBytes[1]);   // unbounded
+    }
+
+One desynchronised byte on an interleaved TCP connection turns H.264/H.265 payload into a
+"text line" that never terminates, and the `ByteArrayOutputStream` grows until the 256 MB
+heap is exhausted. `new byte[size]` in `handleInterleavedBinaryData` is capped at 65535, so
+it was a victim of the exhausted heap, not the cause. There is no length cap in Media3 and
+the file is byte-identical from 1.4.1 to 1.8.0, so upgrading does not help.
+
+Two responses, neither of which pretends to fix Media3:
+
+- `CrashRestart` installs an uncaught-exception handler that schedules an AlarmManager
+  restart and kills the process. In-process recovery is not an option with the heap gone,
+  so the intent is handed to the system. Verified with `adb shell am crash`: the wall is
+  back about five seconds later. It reuses the same SYSTEM_ALERT_WINDOW exemption as
+  `BootReceiver`.
+- `"tcp": false` per camera switches that stream to UDP, avoiding the interleaved parser
+  entirely, at the cost of UDP packet loss. Default stays `true` because that is what is
+  known to work with these cameras; Media3 falls back to TCP by itself if UDP setup fails.
+
 ## Getting back into the app after exiting
 
 `BACK` in the grid and the **إغلاق التطبيق** menu entry both leave the app. Four ways back,

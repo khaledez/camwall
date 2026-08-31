@@ -92,10 +92,10 @@ class MainActivity : Activity() {
                 }
             })
 
-            // forceUseRtpTcp: interleaved RTP over the RTSP TCP connection. Cameras that
-            // refuse UDP, and anything crossing a NAT, need this.
+            // Interleaved RTP over the RTSP TCP connection; see Camera.tcp for the
+            // trade-off against Media3's unbounded RTSP line parser.
             val source = RtspMediaSource.Factory()
-                .setForceUseRtpTcp(true)
+                .setForceUseRtpTcp(camera.tcp)
                 .setTimeoutMs(10_000)
                 .createMediaSource(MediaItem.fromUri(camera.url))
 
@@ -146,6 +146,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashRestart.install(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
         hideSystemUi()
