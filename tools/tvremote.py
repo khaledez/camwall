@@ -7,6 +7,8 @@ to reach Settings when an app is in the foreground and ADB is off.
     ./tvremote.py pair              # once; type the code shown on the TV
     ./tvremote.py key HOME
     ./tvremote.py key BACK DPAD_DOWN DPAD_CENTER
+    ./tvremote.py app net.khaledez.camwall   # relaunch the wall after exiting it
+    ./tvremote.py current                    # what is in the foreground right now
 
 Certificates are stored next to this script, so pairing survives reboots.
 """
@@ -49,6 +51,25 @@ async def do_key(keys):
     r.disconnect()
 
 
+async def do_app(target):
+    r = await remote()
+    await r.async_connect()
+    r.keep_reconnecting()
+    r.send_launch_app_command(target)
+    print(f"launched {target}")
+    await asyncio.sleep(1.0)
+    r.disconnect()
+
+
+async def do_current():
+    r = await remote()
+    await r.async_connect()
+    r.keep_reconnecting()
+    await asyncio.sleep(1.0)
+    print(r.current_app)
+    r.disconnect()
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -59,6 +80,13 @@ def main():
     elif cmd == "key":
         keys = sys.argv[2:] or ["HOME"]
         asyncio.run(do_key(keys))
+    elif cmd == "app":
+        if len(sys.argv) < 3:
+            print("usage: tvremote.py app <package-or-deeplink>")
+            raise SystemExit(2)
+        asyncio.run(do_app(sys.argv[2]))
+    elif cmd == "current":
+        asyncio.run(do_current())
     else:
         print(__doc__)
         raise SystemExit(2)

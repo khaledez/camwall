@@ -15,7 +15,7 @@
     <string name="action_unmute">تشغيل الصوت</string>
     <string name="action_open_lock">فتح القفل</string>
     <string name="action_move">تغيير الموقع</string>
-    <string name="action_exit">إغلاق النظام</string>
+    <string name="action_exit">إغلاق التطبيق</string>
 
     <!-- Door release -->
     <string name="unlock_confirm_title">فتح القفل؟</string>

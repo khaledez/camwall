@@ -49,6 +49,8 @@ Settings when ADB is off (which it will be after every reboot).
     ./.venv/bin/python tools/tvremote.py pair        # once; type the code shown on the TV
     ./.venv/bin/python tools/tvremote.py key HOME
     ./.venv/bin/python tools/tvremote.py key BACK DPAD_DOWN DPAD_CENTER
+    ./.venv/bin/python tools/tvremote.py app camwall://open   # relaunch the wall
+    ./.venv/bin/python tools/tvremote.py current              # what is in the foreground
 
 Certificates are written next to the script and survive reboots, so unlike ADB this is a
 one-time setup. Install with `python -m venv .venv && .venv/bin/pip install androidtvremote2`.
@@ -173,6 +175,21 @@ Total decoder load: 2x h264 720p + 2x hevc 1408x528, comfortably inside the S905
     ./tools/deploy.sh                    # discover device, build, install, push config
     ./tools/deploy.sh <dev> --autostart  # also start the wall on boot
     ./tools/deploy.sh <dev> --restore    # undo autostart
+
+## Getting back into the app after exiting
+
+`BACK` in the grid and the **إغلاق التطبيق** menu entry both leave the app. Four ways back,
+none of which need a reinstall:
+
+1. **Google TV's Apps row** — the app registers `LEANBACK_LAUNCHER`, so it is a proper
+   launcher entry, but Google TV is known to hide sideloaded apps from its rows.
+2. **Settings → Apps → See all apps → open it.** Always works, remote only.
+3. **`tvremote.py app camwall://open`** — needs no ADB.
+4. **Reboot** — `BootReceiver` brings it up.
+
+Route 3 is why the manifest carries a `camwall://` scheme. `send_launch_app_command`
+accepts a bare package name, and an `intent:` URI, and silently does nothing with either;
+it needs a deep link the app actually registers.
 
 ## Starting on boot — do not take over HOME
 

@@ -38,6 +38,17 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
 
+            <!-- Deep link, so the wall can be relaunched from the virtual remote
+                 (tools/tvremote.py app camwall://open). Google TV hides sideloaded apps
+                 from its rows, and send_launch_app_command needs a real registered link —
+                 a bare package name is accepted and silently ignored. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="camwall" />
+            </intent-filter>
+
             <!-- Retained so the app is a HOME candidate, but this is NOT how the wall
                  starts on boot — BootReceiver is. Google TV ignores set-home-activity,
                  and disabling its launcher drops the device into setupwraith recovery
