@@ -3,8 +3,8 @@
 Always-on RTSP camera wall for Chromecast with Google TV. No root.
 
 A single Activity: one `TextureView` + Media3 `RtspMediaSource` per camera, laid out in a
-grid, `FLAG_KEEP_SCREEN_ON`, auto-reconnect with backoff, `CATEGORY_HOME` so the device
-powers on straight into the tiles.
+grid, `FLAG_KEEP_SCREEN_ON`, auto-reconnect with backoff, and a `BOOT_COMPLETED` receiver
+so the device powers on straight into the tiles.
 
 ## Remote control
 
@@ -110,13 +110,41 @@ Total decoder load: 2x h264 720p + 2x hevc 1408x528, comfortably inside the S905
 
 ## Deploy
 
-    ./tools/deploy.sh 192.168.88.172              # build, install, push config
-    ./tools/deploy.sh 192.168.88.172 --launcher   # also take over HOME
-    ./tools/deploy.sh 192.168.88.172 --restore    # give HOME back to Google TV
+    ./tools/deploy.sh                    # discover device, build, install, push config
+    ./tools/deploy.sh <dev> --autostart  # also start the wall on boot
+    ./tools/deploy.sh <dev> --restore    # undo autostart
 
-`--launcher` disables `com.google.android.apps.tv.launcherx`. If the wall ever fails to
-start you are left with no UI on the TV — recovery is `--restore` over ADB, so keep
-network debugging enabled.
+## Starting on boot — do not take over HOME
+
+The obvious approach is a `CATEGORY_HOME` intent filter plus
+`pm disable-user com.google.android.apps.tv.launcherx`. **It does not work on this
+device and it is dangerous.** The app registers correctly as a HOME candidate, but:
+
+- `cmd package set-home-activity` reports `Success` and changes nothing; Google TV routes
+  the Home key to its own launcher regardless.
+- Disabling `launcherx` does not promote the next HOME candidate. Google TV drops into
+  `com.google.android.tungsten.setupwraith/.RecoveryActivity` instead.
+- **Wireless debugging does not survive a reboot**, even with `adb_wifi_enabled=1`
+  persisted. So a device left with no launcher and no ADB needs a factory reset.
+
+Use `BOOT_COMPLETED` instead. Google TV stays installed, enabled and reachable, and there
+is no state the device cannot get out of with the remote.
+
+The catch is that Android 10+ blocks activity starts from a receiver:
+
+    W ActivityTaskManager: Background activity launch blocked
+      [callingPackage: net.khaledez.camwall; callingUidProcState: RECEIVER; ...]
+    I ActivityTaskManager: START ... (BAL_BLOCK) result code=102
+
+`SYSTEM_ALERT_WINDOW` is the exemption — the app never draws an overlay, it only needs the
+appop for this. **Flush it to disk**; `appops` writes are debounced, so setting the appop
+and rebooting straight away silently loses the grant and the start is blocked again with
+no indication why:
+
+    adb shell appops set --user 0 net.khaledez.camwall SYSTEM_ALERT_WINDOW allow
+    adb shell appops write-settings
+
+`--autostart` does both. Verify with `appops get`: it must read `allow`, not `default`.
 
 ## Verifying playback
 

@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Not for drawing overlays: this is the only non-root way to exempt the app from
+         Android 10+ background-activity-start blocking, which otherwise drops the
+         startActivity() that BootReceiver makes (logcat: BAL_BLOCK). Grant it with
+         `adb shell appops set net.khaledez.camwall SYSTEM_ALERT_WINDOW allow`. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <!-- Google TV / Android TV: no touchscreen, leanback UI. -->
     <uses-feature android:name="android.software.leanback" android:required="true" />
@@ -31,7 +36,10 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
 
-            <!-- Become the launcher: device powers on straight into the wall. -->
+            <!-- Retained so the app is a HOME candidate, but this is NOT how the wall
+                 starts on boot — BootReceiver is. Google TV ignores set-home-activity,
+                 and disabling its launcher drops the device into setupwraith recovery
+                 rather than promoting this. See README. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />

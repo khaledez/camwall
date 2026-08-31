@@ -3,8 +3,8 @@
 #
 #   ./tools/deploy.sh                          # discover the device via mDNS
 #   ./tools/deploy.sh 192.168.88.172:46571     # explicit host:port
-#   ./tools/deploy.sh <dev> --launcher         # ...and make it the HOME app
-#   ./tools/deploy.sh <dev> --restore          # undo the launcher takeover
+#   ./tools/deploy.sh <dev> --autostart        # ...and start the wall on boot
+#   ./tools/deploy.sh <dev> --restore          # undo autostart
 #
 # Wireless debugging uses a random port that changes on reboot, so with no argument
 # we ask mDNS where adb is listening rather than assuming 5555.
@@ -52,11 +52,13 @@ fi
 "$ADB" -s "$DEV" wait-for-device
 
 if [ "$MODE" = "--restore" ]; then
-    echo ">> restoring Google TV launcher"
-    "$ADB" -s "$DEV" shell cmd package set-home-activity "$GTV_LAUNCHER/.MainActivity" || true
-    "$ADB" -s "$DEV" shell pm enable "$GTV_LAUNCHER"
-    "$ADB" -s "$DEV" shell pm clear-package-preferred-activities "$PKG" || true
-    echo ">> done; reboot the device to be sure"
+    echo ">> revoking boot autostart"
+    "$ADB" -s "$DEV" shell appops set --user 0 "$PKG" SYSTEM_ALERT_WINDOW default || true
+    "$ADB" -s "$DEV" shell appops write-settings || true
+    # Only relevant if a previous attempt disabled the launcher; harmless otherwise.
+    "$ADB" -s "$DEV" shell pm enable "$GTV_LAUNCHER" || true
+    "$ADB" -s "$DEV" shell cmd package set-home-activity "$GTV_LAUNCHER/.home.HomeActivity" || true
+    echo ">> done"
     exit 0
 fi
 
@@ -80,12 +82,18 @@ else
     echo "!! no cameras.json at repo root — falling back to built-in placeholder URLs"
 fi
 
-if [ "$MODE" = "--launcher" ]; then
-    echo ">> making $PKG the HOME activity"
-    "$ADB" -s "$DEV" shell cmd package set-home-activity "$PKG/.MainActivity"
-    echo ">> disabling $GTV_LAUNCHER"
-    "$ADB" -s "$DEV" shell pm disable-user --user 0 "$GTV_LAUNCHER"
-    echo "   recover with: $0 $DEV --restore"
+if [ "$MODE" = "--autostart" ]; then
+    # BootReceiver's startActivity() is dropped by Android 10+ background-activity-start
+    # blocking unless the app is exempt. SYSTEM_ALERT_WINDOW is the exemption; the app
+    # never draws an overlay.
+    echo ">> granting the background-activity-start exemption"
+    "$ADB" -s "$DEV" shell appops set --user 0 "$PKG" SYSTEM_ALERT_WINDOW allow
+    # appops writes are debounced; without this an immediate reboot loses the grant and
+    # the boot start is blocked with no obvious reason why.
+    "$ADB" -s "$DEV" shell appops write-settings
+    echo -n "   appop now: "
+    "$ADB" -s "$DEV" shell appops get --user 0 "$PKG" SYSTEM_ALERT_WINDOW | tr -d '\r'
+    echo "   undo with: $0 $DEV --restore"
 fi
 
 echo ">> launching"
