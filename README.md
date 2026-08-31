@@ -107,6 +107,21 @@ follows github.com/khaledez/camonitor `digest.go`: parameter order mirroring
 wrong form answers `401 Invalid Authority!`, which reads like a permissions problem but is
 an auth-response mismatch.
 
+Cleartext HTTP also has to be permitted explicitly. Android 9+ refuses it for apps
+targeting SDK 28+, failing the request before a socket opens:
+
+    IOException: Cleartext HTTP traffic to 192.168.88.200 not permitted
+
+`res/xml/network_security_config.xml` allows it, referenced from the manifest. The door
+stations do listen on 443, but with self-signed certificates needing their own trust
+anchors, and the unlock hosts come from `cameras.json` so they cannot be pinned ahead of
+time.
+
+**Test auth changes on the device, not from a workstation.** Both failures above —
+OkHttp's missing Digest support and the cleartext policy — are Android-side, and a
+`curl`/Python check against the camera passes cleanly while the app still cannot make
+the call.
+
 The two Dahua units here are DHI-VTO3311Q-WP door stations, which answer
 `accessControl.cgi`; `?action=getDoorStatus&channel=1` reports lock state without
 triggering anything. Save it at the repo root — it is gitignored,

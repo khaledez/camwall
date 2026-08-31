@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      Android 9+ blocks cleartext HTTP when targetSdk >= 28, which fails the door-release
+      request with:  IOException: Cleartext HTTP traffic to <host> not permitted
+
+      The cameras and VTO door stations are LAN devices whose CGI endpoints are plain HTTP.
+      They do listen on 443, but with self-signed certificates that would need their own
+      trust anchors — and the endpoints come from cameras.json, so the hosts cannot be
+      enumerated here. This app makes exactly one kind of HTTP request (the configured
+      unlock URL) to equipment on the local network.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
