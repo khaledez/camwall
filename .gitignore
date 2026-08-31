@@ -1,0 +1,5 @@
+cameras.json
+.gradle/
+build/
+local.properties
+*.apk

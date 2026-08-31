@@ -1,0 +1,144 @@
+# camwall
+
+Always-on RTSP camera wall for Chromecast with Google TV. No root.
+
+A single Activity: one `TextureView` + Media3 `RtspMediaSource` per camera, laid out in a
+grid, `FLAG_KEEP_SCREEN_ON`, auto-reconnect with backoff, `CATEGORY_HOME` so the device
+powers on straight into the tiles.
+
+## Remote control
+
+| Input | Action |
+|-------|--------|
+| D-pad | move the selection (green border) |
+| OK twice | full screen the selected tile |
+| BACK | return to the grid (ignored in the grid — this is the HOME app) |
+| OK long-press | actions: full screen, mute/unmute, open lock |
+
+The Chromecast remote has no MENU or colour buttons, so long-press OK carries the menu.
+
+## Why TextureView and not SurfaceView
+
+`SurfaceView` requests a hardware overlay plane. With four video planes live, this SoC's
+compositor mis-assigns buffers — two tiles render the *same* camera while another
+disappears. It is a compositor bug, not an app one: the same frame captured with overlays
+forced off (`service call SurfaceFlinger 1008 i32 1`) was always correct.
+
+`TextureView` composites on the GPU and sidesteps the plane allocation entirely. At
+2x720p + 2x1408x528 the GPU cost is not measurable on an S905D3. A side benefit is that
+plain `adb shell screencap` now shows exactly what the TV shows.
+
+## Layout
+
+    app/src/main/java/net/khaledez/camwall/
+      MainActivity.kt    grid, players, reconnect
+      CameraConfig.kt    reads cameras.json, falls back to built-in defaults
+      BootReceiver.kt    BOOT_COMPLETED
+    tools/
+      probe-rtsp.py      find substream paths, report codec + resolution
+      deploy.sh          build, install, configure over ADB
+
+## Setup
+
+One-time host toolchain. **Build on JDK 17 or 21** — AGP is not validated on newer JDKs,
+and Gradle 8.9 does not run on Java 23+. If your default `java` is newer, either set
+`JAVA_HOME` or let `deploy.sh` find a supported one:
+
+    sudo pacman -S jdk21-openjdk        # system default may stay newer
+    export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+    ~/Android/Sdk/cmdline-tools/latest/bin/sdkmanager \
+        "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+On the device: Settings -> System -> About -> tap *Android TV OS build* 7x,
+then System -> Developer options -> **ADB debugging** on.
+
+## Cameras
+
+Find the substream paths and confirm the codec:
+
+    ./tools/probe-rtsp.py --user admin --pass 'secret' \
+        192.168.88.200 192.168.88.202 192.168.88.10 192.168.88.15
+
+It prints a ready-made `cameras.json`. Entries take two optional fields:
+
+    {
+      "name": "Gate 200",
+      "url":  "rtsp://user:pass@192.168.88.200:554/cam/realmonitor?channel=1&subtype=0",
+      "audio": false,
+      "unlock": {
+        "url":  "http://192.168.88.200/cgi-bin/accessControl.cgi?action=openDoor&channel=1&UserID=101&Type=Remote",
+        "user": "admin", "pass": "..."
+      }
+    }
+
+`audio` defaults to false — four live audio streams at once is not useful; unmute per
+tile from the menu instead (unmuted tiles show a musical note by their name). `unlock`
+adds an **Open lock** menu entry, behind a confirmation because a door release is
+one-way. Digest auth is handled by `HttpURLConnection`; any vendor's relay URL works.
+
+The two Dahua units here are DHI-VTO3311Q-WP door stations, which answer
+`accessControl.cgi`; `?action=getDoorStatus&channel=1` reports lock state without
+triggering anything. Save it at the repo root — it is gitignored,
+because the RTSP URLs carry credentials. It is pushed to the device's external files
+dir, so credentials never sit inside the APK.
+
+Two constraints worth respecting:
+
+- **Use substreams (~640x360), not main streams.** The S905D3 has a small, finite number
+  of hardware decoder instances; four main streams will exhaust them.
+- **H.265 is fine.** `media3-exoplayer-rtsp` 1.4.1 ships `RtpH265Reader`, so HEVC
+  depayloads correctly — verified by inspecting the AAR, not assumed. The Tiandy
+  cameras here are HEVC-only and are expected to work.
+
+RTP-over-TCP is forced in `MainActivity.kt` (`setForceUseRtpTcp(true)`), which is what
+most cameras that refuse UDP need.
+
+## Cameras on this network
+
+| IP | Model | Main | Substream | Using |
+|----|-------|------|-----------|-------|
+| .200 | Dahua-family | h264 1280x720 | h264 352x288 (`subtype=1`) | main — sub is CIF, too soft |
+| .202 | Dahua-family | h264 1280x720 | h264 352x288 (`subtype=1`) | main |
+| .10 | Tiandy TC-C382V | hevc 4640x1728 (`/1/1`) | hevc 1408x528 (`/1/2`) | sub |
+| .15 | Tiandy TC-C382V | hevc 4640x1728 (`/1/1`) | hevc 1408x528 (`/1/2`) | sub |
+
+Tiandy's RTSP path is `/<channel>/<stream>`; it answers *every* other path with the main
+stream, so path brute-forcing looks like it succeeds everywhere. Its ISAPI is partial —
+`/ISAPI/System/deviceInfo` works, `/ISAPI/Streaming/channels` returns `notSupport`.
+
+Total decoder load: 2x h264 720p + 2x hevc 1408x528, comfortably inside the S905D3.
+
+## Deploy
+
+    ./tools/deploy.sh 192.168.88.172              # build, install, push config
+    ./tools/deploy.sh 192.168.88.172 --launcher   # also take over HOME
+    ./tools/deploy.sh 192.168.88.172 --restore    # give HOME back to Google TV
+
+`--launcher` disables `com.google.android.apps.tv.launcherx`. If the wall ever fails to
+start you are left with no UI on the TV — recovery is `--restore` over ADB, so keep
+network debugging enabled.
+
+## Verifying playback
+
+With `TextureView`, `adb shell screencap` shows the real output and one HWC layer (the
+app window) is expected. If you ever switch back to `SurfaceView`, note that screencap
+cannot read overlay planes — tiles come out black while being fine on the TV — and you
+would have to check `dumpsys SurfaceFlinger | sed -n '/HWC layers/,/^$/p'` instead, or
+force GPU composition with `service call SurfaceFlinger 1008 i32 1` (undo with `i32 0`).
+
+## Logs
+
+    adb -s <dev> logcat -s CamWall:V ExoPlayerImpl:V
+
+`MainActivity` hides a tile's label only on `STATE_READY`, so a tile showing no label is
+connected. A label reading `Cam N - <ERROR_CODE>` means that stream is in backoff.
+
+## Connecting
+
+USB debugging alone does **not** open a network ADB port on Android 11+. Use
+**Wireless debugging**, which uses a random port and requires pairing:
+
+    adb pair 192.168.88.172:<pair-port> <6-digit-code>     # both shown on the TV
+    adb connect 192.168.88.172:<connect-port>              # from avahi-browse -rtp _adb-tls-connect._tcp
+
+The connect port changes on reboot; rediscover it via mDNS rather than hardcoding.
