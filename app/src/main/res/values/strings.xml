@@ -9,13 +9,13 @@
     <string name="app_name">جدار الكاميرات</string>
 
     <!-- Long-press OK menu -->
-    <string name="action_fullscreen">ملء الشاشة</string>
-    <string name="action_back_to_grid">العودة إلى الشبكة</string>
+    <string name="action_fullscreen">تكبير العرض</string>
+    <string name="action_back_to_grid">رجوع</string>
     <string name="action_mute">كتم الصوت</string>
-    <string name="action_unmute">إلغاء كتم الصوت</string>
+    <string name="action_unmute">تشغيل الصوت</string>
     <string name="action_open_lock">فتح القفل</string>
-    <string name="action_move">تغيير الموضع</string>
-    <string name="action_exit">الخروج إلى Google TV</string>
+    <string name="action_move">تغيير الموقع</string>
+    <string name="action_exit">إغلاق النظام</string>
 
     <!-- Door release -->
     <string name="unlock_confirm_title">فتح القفل؟</string>
