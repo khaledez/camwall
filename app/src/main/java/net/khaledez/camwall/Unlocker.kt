@@ -122,7 +122,11 @@ object Unlocker {
         }
     }
 
-    /** Calls [onResult] on the main thread with a short human-readable outcome. */
+    /**
+     * Calls [onResult] on the main thread. The second argument is an untranslated technical
+     * detail (HTTP status and body, or an exception name) for the caller to wrap in a
+     * localized message — it is empty on success.
+     */
     fun open(unlock: Unlock, onResult: (Boolean, String) -> Unit) {
         io.execute {
             val (ok, message) = try {
@@ -140,11 +144,10 @@ object Unlocker {
 
                 // Dahua answers a bare "OK" on success and "Error"/"Invalid Authority!" otherwise.
                 val good = reply.code in 200..299 && !reply.body.contains("Error", ignoreCase = true)
-                good to if (good) "Lock released"
-                        else "Failed: HTTP ${reply.code} ${reply.body.take(60)}"
+                good to if (good) "" else "HTTP ${reply.code} ${reply.body.take(60)}"
             } catch (e: Exception) {
                 Log.e(TAG, "unlock failed", e)
-                false to "Failed: ${e.javaClass.simpleName} ${e.message.orEmpty().take(60)}"
+                false to "${e.javaClass.simpleName} ${e.message.orEmpty().take(60)}"
             }
             main.post { onResult(ok, message) }
         }

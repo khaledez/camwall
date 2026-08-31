@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Arabic lives in the default values/ folder, not values-ar/, on purpose: the device
+  locale here is en-GB, and a values-ar/ set would only apply on an Arabic-locale device.
+  Keeping Arabic as the fallback makes the app Arabic everywhere. Add values-en/ if an
+  English build is ever wanted on an English-locale device.
+-->
+<resources>
+    <string name="app_name">جدار الكاميرات</string>
+
+    <!-- Long-press OK menu -->
+    <string name="action_fullscreen">ملء الشاشة</string>
+    <string name="action_back_to_grid">العودة إلى الشبكة</string>
+    <string name="action_mute">كتم الصوت</string>
+    <string name="action_unmute">إلغاء كتم الصوت</string>
+    <string name="action_open_lock">فتح القفل</string>
+    <string name="action_move">تغيير الموضع</string>
+    <string name="action_exit">الخروج إلى Google TV</string>
+
+    <!-- Door release -->
+    <string name="unlock_confirm_title">فتح القفل؟</string>
+    <string name="unlock_confirm_message">سيتم فتح الباب عند %1$s.</string>
+    <string name="dialog_cancel">إلغاء</string>
+    <string name="dialog_open">فتح</string>
+    <string name="toast_unlocking">جارٍ فتح %1$s…</string>
+    <string name="toast_unlock_ok">تم فتح القفل</string>
+    <string name="toast_unlock_failed">فشل: %1$s</string>
+
+    <!-- Tiles -->
+    <string name="toast_muted">%1$s: تم كتم الصوت</string>
+    <string name="toast_unmuted">%1$s: تم تشغيل الصوت</string>
+    <string name="toast_move_hint">حرّك %1$s بأزرار الاتجاهات، ثم OK أو رجوع عند الانتهاء</string>
+    <string name="label_moving">↔ يتم النقل</string>
+    <!-- name — ExoPlayer error code; the code stays untranslated so it can be searched -->
+    <string name="label_error">%1$s — %2$s</string>
+</resources>

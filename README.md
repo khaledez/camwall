@@ -26,6 +26,20 @@ Renaming a camera drops it to the end of the grid.
 BACK must be able to exit: the wall is started by `BootReceiver` and sits on top of the
 Google TV launcher, so swallowing BACK strands anyone whose HOME button does not work.
 
+## Language
+
+The UI is Arabic. The strings live in `res/values/strings.xml` — the **default** folder,
+not `values-ar/`, deliberately: the device locale is `en-GB`, and a `values-ar/` set would
+only apply on an Arabic-locale device. Keeping Arabic as the fallback makes the app Arabic
+regardless of device locale. Add `values-en/` if an English build is ever wanted.
+
+`android:supportsRtl="true"` is set, so dialogs and labels lay out right-to-left. The grid
+itself is unaffected — tile positions come from the saved layout, not text direction, so
+switching language does not rearrange the wall.
+
+Camera names are **not** translated: they come from `cameras.json` and are yours to set.
+Rename them there in Arabic if you want the tile labels to match the rest of the UI.
+
 ## Virtual remote
 
 `tools/tvremote.py` drives the device over `_androidtvremote2._tcp` (port 6466) — the same

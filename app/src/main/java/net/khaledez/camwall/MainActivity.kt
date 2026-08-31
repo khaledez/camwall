@@ -80,7 +80,7 @@ class MainActivity : Activity() {
             p.addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
                     Log.e(TAG, "${camera.name}: ${error.errorCodeName}", error)
-                    setLabel("${camera.name} — ${error.errorCodeName}")
+                    setLabel(getString(R.string.label_error, camera.name, error.errorCodeName))
                     scheduleRetry()
                 }
 
@@ -106,7 +106,7 @@ class MainActivity : Activity() {
         }
 
         fun setLabel(text: String) {
-            val moving = if (this === movingTile) "  ↔ moving" else ""
+            val moving = if (this === movingTile) "  " + getString(R.string.label_moving) else ""
             label.text = (if (muted) text else "$text  ♪") + moving
         }
 
@@ -259,7 +259,7 @@ class MainActivity : Activity() {
         movingTile = tile
         tile.cell.foreground = selectionBorder(moving = true)
         tile.refreshLabel()
-        toast("Move ${tile.camera.name} with the D-pad, OK or BACK when done")
+        toast(getString(R.string.toast_move_hint, tile.camera.name))
     }
 
     private fun endMove() {
@@ -318,24 +318,27 @@ class MainActivity : Activity() {
         val labels = ArrayList<String>()
         val actions = ArrayList<() -> Unit>()
 
-        labels.add(if (fullscreenIndex == tile.index) "Back to grid" else "Full screen")
+        labels.add(getString(
+            if (fullscreenIndex == tile.index) R.string.action_back_to_grid
+            else R.string.action_fullscreen))
         actions.add { if (fullscreenIndex == tile.index) exitFullscreen() else enterFullscreen(tile) }
 
-        labels.add(if (tile.muted) "Unmute" else "Mute")
+        labels.add(getString(if (tile.muted) R.string.action_unmute else R.string.action_mute))
         actions.add {
             val muted = tile.toggleMute()
-            toast("${tile.camera.name}: ${if (muted) "muted" else "unmuted"}")
+            toast(getString(
+                if (muted) R.string.toast_muted else R.string.toast_unmuted, tile.camera.name))
         }
 
         tile.camera.unlock?.let { unlock ->
-            labels.add("Open lock")
+            labels.add(getString(R.string.action_open_lock))
             actions.add { confirmUnlock(tile, unlock) }
         }
 
-        labels.add("Move")
+        labels.add(getString(R.string.action_move))
         actions.add { startMove(tile) }
 
-        labels.add("Exit to Google TV")
+        labels.add(getString(R.string.action_exit))
         actions.add { finish() }
 
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
@@ -347,12 +350,15 @@ class MainActivity : Activity() {
     /** A lock is physical and one-way: always confirm before releasing it. */
     private fun confirmUnlock(tile: Tile, unlock: Unlock) {
         AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Open lock?")
-            .setMessage("Release the door at ${tile.camera.name}.")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Open") { _, _ ->
-                toast("Opening ${tile.camera.name}…")
-                Unlocker.open(unlock) { _, message -> toast(message) }
+            .setTitle(R.string.unlock_confirm_title)
+            .setMessage(getString(R.string.unlock_confirm_message, tile.camera.name))
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .setPositiveButton(R.string.dialog_open) { _, _ ->
+                toast(getString(R.string.toast_unlocking, tile.camera.name))
+                Unlocker.open(unlock) { ok, detail ->
+                    toast(if (ok) getString(R.string.toast_unlock_ok)
+                          else getString(R.string.toast_unlock_failed, detail))
+                }
             }
             .show()
     }
