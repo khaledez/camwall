@@ -33,4 +33,5 @@
     <string name="label_moving">↔ يتم النقل</string>
     <!-- name — ExoPlayer error code; the code stays untranslated so it can be searched -->
     <string name="label_error">%1$s — %2$s</string>
+    <string name="label_no_cameras">لا توجد كاميرات — تحقق من ملف cameras.json</string>
 </resources>

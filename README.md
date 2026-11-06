@@ -69,8 +69,10 @@ plain `adb shell screencap` now shows exactly what the TV shows.
 ## Layout
 
     app/src/main/java/net/khaledez/camwall/
-      MainActivity.kt    grid, players, reconnect
-      CameraConfig.kt    reads cameras.json, falls back to built-in defaults
+      MainActivity.kt    grid, players, reconnect, stall watchdog
+      CameraConfig.kt    reads cameras.json (no built-in cameras)
+      CrashRestart.kt    brings the wall back after a Java crash or native abort
+      Unlocker.kt        door release over HTTP Digest
       BootReceiver.kt    BOOT_COMPLETED
     tools/
       probe-rtsp.py      find substream paths, report codec + resolution
@@ -148,25 +150,29 @@ Two constraints worth respecting:
 
 - **Use substreams (~640x360), not main streams.** The S905D3 has a small, finite number
   of hardware decoder instances; four main streams will exhaust them.
-- **H.265 is fine.** `media3-exoplayer-rtsp` 1.4.1 ships `RtpH265Reader`, so HEVC
+- **H.265 is fine.** `media3-exoplayer-rtsp` ships `RtpH265Reader` (since 1.4), so HEVC
   depayloads correctly — verified by inspecting the AAR, not assumed. The Tiandy
   cameras here are HEVC-only and are expected to work.
 
-RTP-over-TCP is forced in `MainActivity.kt` (`setForceUseRtpTcp(true)`), which is what
+RTP-over-TCP is the default (`"tcp": true` per camera, passed to `setForceUseRtpTcp`), which is what
 most cameras that refuse UDP need.
 
 ## Cameras on this network
 
-| IP | Model | Main | Substream | Using |
-|----|-------|------|-----------|-------|
-| .200 | Dahua-family | h264 1280x720 | h264 352x288 (`subtype=1`) | main — sub is CIF, too soft |
-| .202 | Dahua-family | h264 1280x720 | h264 352x288 (`subtype=1`) | main |
-| .10 | Tiandy TC-C382V | hevc 4640x1728 (`/1/1`) | hevc 1408x528 (`/1/2`) | sub |
-| .15 | Tiandy TC-C382V | hevc 4640x1728 (`/1/1`) | hevc 1408x528 (`/1/2`) | sub |
+The wall pulls every stream from the **Tiandy NVR at .210**, not from the cameras, so
+the cameras serve one client (the NVR) however many viewers there are. Its RTSP path is
+`/<channel>/<stream>` (1 = main, 2 = sub):
 
-Tiandy's RTSP path is `/<channel>/<stream>`; it answers *every* other path with the main
-stream, so path brute-forcing looks like it succeeds everywhere. Its ISAPI is partial —
-`/ISAPI/System/deviceInfo` works, `/ISAPI/Streaming/channels` returns `notSupport`.
+| NVR path | Camera | Stream | Tile |
+|----------|--------|--------|------|
+| `/1/2` | .15 Tiandy TC-C382V | hevc 1408x528 (sub) | Front |
+| `/4/2` | .10 Tiandy TC-C382V | hevc 1408x528 (sub) | South |
+| `/2/1` | .202 Dahua VTO | h264 1280x720 (main — sub is 352x288, too soft) | Gate 202 |
+| `/3/1` | .200 Dahua VTO | h264 1280x720 (main) | Gate 200 |
+
+Never use a Tiandy main stream (`/1/1`, `/4/1`): it is 4640x1728 and exhausts the decoder.
+Like the cameras, the NVR answers unknown paths with the main stream, so a typo in a path
+silently becomes 4K. Door releases (`unlock`) still go straight to the VTOs.
 
 Total decoder load: 2x h264 720p + 2x hevc 1408x528, comfortably inside the S905D3.
 
@@ -178,41 +184,40 @@ Total decoder load: 2x h264 720p + 2x hevc 1408x528, comfortably inside the S905
 
 ## The OOM crash, and why the app restarts itself
 
-Observed after ~2h of normal running: the process died with
+Observed repeatedly (about ten times between 2026-11-01 and 11-04): the process dies with
 
     FATAL EXCEPTION: ExoPlayer:Playback
-    java.lang.OutOfMemoryError: Failed to allocate a 64 byte allocation with 398808 free
-    bytes and 389KB until OOM, target footprint 268435456 ... at MediaCodec.getInputBuffer
+    java.lang.OutOfMemoryError: Failed to allocate a 64 byte allocation with 98288 free
+    bytes and 95KB until OOM, target footprint 268435456 ... at MediaCodec.getOutputBuffer
 
-with `LoadTask: OutOfMemory error loading stream` in `RtspMessageChannel$Receiver
-.handleInterleavedBinaryData` and `RtpPacket.parse`.
+and sometimes as a native abort instead (`SIGABRT in MediaCodec_loop: could not create
+MediaCodec.BufferInfo object`). Steady-state heap is ~12 MB, so the heap is filled
+suddenly, by Media3's RTSP stack, not by a slow leak in this app. Two paths, both
+checked against the 1.4.1 sources and still present in 1.11.1:
 
-This is not a leak in this app — steady-state heap sits at ~6 MB of 12 MB and GC keeps it
-flat. It is Media3's RTSP receiver. `Receiver.load()` reads one byte, and anything that is
-not the `$` interleave marker is treated as the start of an RTSP *text* message:
+- **A stalled stream is never torn down.** If RTP data stops, Media3 ends or stalls the
+  stream without raising an error, and a server that never answers leaves the player
+  buffering forever. Either way the RTSP session stays open, and the interleaved TCP data
+  channel keeps appending every packet to an unbounded `LinkedBlockingQueue` that nothing
+  reads any more (`TransferRtpDataChannel`, whose `close()` is empty). At 720p that fills
+  256 MB in 10–15 minutes. It also shows up first as a frozen tile.
+- **Interleaved-TCP desync.** `RtspMessageChannel` treats any byte that is not the `$`
+  marker as RTSP text. Once out of sync, every CRLF-terminated chunk of video becomes a
+  "line" appended to a list that is only cleared by a valid RTSP start line, which never
+  comes. The heap grows at about twice the stream's bitrate.
 
-    // RtspMessageChannel.parseNextLine
-    while (peekedBytes[0] != Ascii.CR || peekedBytes[1] != Ascii.LF) {
-      peekedBytes[1] = dataInputStream.readByte();
-      messageByteStream.write(peekedBytes[1]);   // unbounded
-    }
+Three responses, none of which pretends to fix Media3:
 
-One desynchronised byte on an interleaved TCP connection turns H.264/H.265 payload into a
-"text line" that never terminates, and the `ByteArrayOutputStream` grows until the 256 MB
-heap is exhausted. `new byte[size]` in `handleInterleavedBinaryData` is capped at 65535, so
-it was a victim of the exhausted heap, not the cause. There is no length cap in Media3 and
-the file is byte-identical from 1.4.1 to 1.8.0, so upgrading does not help.
-
-Two responses, neither of which pretends to fix Media3:
-
-- `CrashRestart` installs an uncaught-exception handler that schedules an AlarmManager
-  restart and kills the process. In-process recovery is not an option with the heap gone,
-  so the intent is handed to the system. Verified with `adb shell am crash`: the wall is
-  back about five seconds later. It reuses the same SYSTEM_ALERT_WINDOW exemption as
-  `BootReceiver`.
-- `"tcp": false` per camera switches that stream to UDP, avoiding the interleaved parser
-  entirely, at the cost of UDP packet loss. Default stays `true` because that is what is
-  known to work with these cameras; Media3 falls back to TCP by itself if UDP setup fails.
+- **Stall watchdog** (`MainActivity`): a tile that is buffering for more than 15 s, or
+  whose stream ends, counts as failed. The player is released, which closes the socket
+  and frees the queue, and the tile reconnects with backoff. The label shows `STALLED` or
+  `ENDED` meanwhile.
+- **`CrashRestart`**: an uncaught-exception handler schedules an AlarmManager restart and
+  kills the process. Native aborts skip that handler, so while the wall is on screen a
+  restart is also kept scheduled 2.5 minutes ahead and pushed back every minute. If the
+  process vanishes, the alarm fires. Leaving the wall (BACK, another app) cancels it.
+- **`"tcp": false`** per camera switches that stream to UDP, avoiding the interleaved
+  parser entirely, at the cost of UDP packet loss. Default stays `true`.
 
 ## Getting back into the app after exiting
 
@@ -273,15 +278,16 @@ force GPU composition with `service call SurfaceFlinger 1008 i32 1` (undo with `
 
     adb -s <dev> logcat -s CamWall:V ExoPlayerImpl:V
 
-`MainActivity` hides a tile's label only on `STATE_READY`, so a tile showing no label is
-connected. A label reading `Cam N - <ERROR_CODE>` means that stream is in backoff.
+A tile's label is its camera name while it plays. `Name — <REASON>` (an ExoPlayer error
+code, `STALLED` or `ENDED`) means that stream is in backoff; the logcat line says when the
+next attempt is.
 
 ## Connecting
 
 USB debugging alone does **not** open a network ADB port on Android 11+. Use
 **Wireless debugging**, which uses a random port and requires pairing:
 
-    adb pair 192.168.88.172:<pair-port> <6-digit-code>     # both shown on the TV
-    adb connect 192.168.88.172:<connect-port>              # from avahi-browse -rtp _adb-tls-connect._tcp
+    adb pair 192.168.88.171:<pair-port> <6-digit-code>     # both shown on the TV
+    adb connect 192.168.88.171:<connect-port>              # from `adb mdns services`
 
 The connect port changes on reboot; rediscover it via mDNS rather than hardcoding.

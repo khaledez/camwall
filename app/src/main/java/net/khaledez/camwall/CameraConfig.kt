@@ -15,10 +15,9 @@ data class Camera(
     val audio: Boolean = false,
     /**
      * Interleave RTP over the RTSP TCP connection. Default true: cameras that refuse UDP
-     * need it, and it costs nothing on the ones that don't. Set false to use UDP, which
-     * avoids Media3's unbounded RTSP line parser — the source of the OOM documented in
-     * CrashRestart — at the cost of UDP's own packet loss. Media3 falls back to TCP by
-     * itself if UDP setup fails.
+     * need it. Set false to use UDP, which sidesteps Media3's interleaved-TCP parser (one
+     * of the ways its RTSP stack fills the heap, see the README) at the cost of UDP's own
+     * packet loss. Media3 falls back to TCP by itself if UDP gets no data at all.
      */
     val tcp: Boolean = true,
     val unlock: Unlock? = null
@@ -30,51 +29,50 @@ data class Camera(
  *
  *   adb push cameras.json /sdcard/Android/data/net.khaledez.camwall/files/cameras.json
  *
- * Falls back to DEFAULTS when the file is missing or unparseable.
+ * There are no built-in cameras: a missing or broken file yields an empty list, which the
+ * wall reports on screen. Entries that cannot be read are skipped one by one.
  */
 object CameraConfig {
     private const val TAG = "CamWall"
     const val FILE_NAME = "cameras.json"
 
-    private val DEFAULTS = listOf(
-        // Dahua VTO door stations: main stream, H.264 1280x720. The substream
-        // (subtype=1) is only 352x288, too soft for a wall tile.
-        Camera("Cam 200", "rtsp://USER:PASS@192.168.88.200:554/cam/realmonitor?channel=1&subtype=0"),
-        Camera("Cam 202", "rtsp://USER:PASS@192.168.88.202:554/cam/realmonitor?channel=1&subtype=0"),
-        // Tiandy TC-C382V: path is /<channel>/<stream>. /1/2 is H.265 1408x528;
-        // /1/1 is the 4640x1728 panoramic main stream, too big for a tile.
-        Camera("Cam 10", "rtsp://USER:PASS@192.168.88.10:554/1/2"),
-        Camera("Cam 15", "rtsp://USER:PASS@192.168.88.15:554/1/2")
-    )
-
     fun load(context: Context): List<Camera> {
-        val file = File(context.getExternalFilesDir(null), FILE_NAME)
-        if (!file.canRead()) {
-            Log.w(TAG, "no ${file.absolutePath}, using built-in defaults")
-            return DEFAULTS
+        val dir = context.getExternalFilesDir(null)
+        val file = File(dir, FILE_NAME)
+        if (dir == null || !file.canRead()) {
+            Log.w(TAG, "no readable ${file.absolutePath}")
+            return emptyList()
         }
-        return try {
-            val arr = JSONObject(file.readText()).getJSONArray("cameras")
-            val out = ArrayList<Camera>(arr.length())
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                val u = o.optJSONObject("unlock")?.let {
-                    Unlock(it.getString("url"), it.optString("user"), it.optString("pass"))
-                }
-                out.add(
-                    Camera(
-                        name = o.optString("name", "Cam ${i + 1}"),
-                        url = o.getString("url"),
-                        audio = o.optBoolean("audio", false),
-                        tcp = o.optBoolean("tcp", true),
-                        unlock = u
-                    )
-                )
-            }
-            if (out.isEmpty()) DEFAULTS else out
+        val arr = try {
+            JSONObject(file.readText()).getJSONArray("cameras")
         } catch (e: Exception) {
-            Log.e(TAG, "bad ${file.absolutePath}, using defaults", e)
-            DEFAULTS
+            // Not the exception itself: JSONException messages quote the whole input,
+            // which would put every password in the file into logcat.
+            Log.e(TAG, "bad ${file.absolutePath}: ${e.javaClass.simpleName}")
+            return emptyList()
         }
+
+        val cameras = ArrayList<Camera>(arr.length())
+        for (i in 0 until arr.length()) {
+            try {
+                cameras.add(parseCamera(arr.getJSONObject(i), i))
+            } catch (e: Exception) {
+                Log.e(TAG, "skipping camera #${i + 1} in ${FILE_NAME}: ${e.javaClass.simpleName}")
+            }
+        }
+        return cameras
+    }
+
+    private fun parseCamera(o: JSONObject, index: Int): Camera {
+        val unlock = o.optJSONObject("unlock")?.let {
+            Unlock(it.getString("url"), it.optString("user"), it.optString("pass"))
+        }
+        return Camera(
+            name = o.optString("name", "Cam ${index + 1}"),
+            url = o.getString("url"),
+            audio = o.optBoolean("audio", false),
+            tcp = o.optBoolean("tcp", true),
+            unlock = unlock
+        )
     }
 }

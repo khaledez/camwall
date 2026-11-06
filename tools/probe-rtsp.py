@@ -6,8 +6,11 @@ Uses ffprobe as the RTSP engine — hand-rolled digest auth is not worth maintai
 
     ./probe-rtsp.py --user admin --pass 'secret' 192.168.88.200 192.168.88.10
 
-Prints a ready-to-use cameras.json, preferring the smallest H.264 stream found,
-since Media3's RTSP stack cannot decode H.265 and the SoC has few decoder slots.
+Prints a ready-to-use cameras.json, preferring the stream closest to a wall tile, since
+the SoC has few decoder slots. H.265 is fine: Media3 ships RtpH265Reader.
+
+Tiandy devices answer *every* unknown path with the main stream, so for them a path that
+"opens" proves nothing — trust the resolution, not the path.
 """
 import argparse, json, os, re, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
@@ -99,8 +102,7 @@ def main():
                 print("  nothing opened — wrong credentials, or a path not in the list")
                 continue
             for path, codec, w, h, r in sorted(results, key=lambda x: x[2] * x[3]):
-                note = "" if codec == "h264" else f"   <-- {codec.upper()}: Media3 RTSP cannot decode this"
-                print(f"  {path}\n      {codec} {w}x{h} @{r}fps{note}")
+                print(f"  {path}\n      {codec} {w}x{h} @{r}fps")
             # Pick the stream closest to a wall tile (~960x540) without going far under:
             # the smallest stream is often CIF, which is too soft to be useful.
             target = 960 * 540

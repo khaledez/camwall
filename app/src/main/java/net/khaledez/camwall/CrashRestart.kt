@@ -9,55 +9,48 @@ import android.util.Log
 import kotlin.system.exitProcess
 
 /**
- * Restarts the wall after a fatal exception, because this is an always-on display that
- * nobody is watching for crashes.
+ * Brings the wall back after it dies, because this is an always-on display that nobody is
+ * watching for crashes. Two ways it dies, so two mechanisms:
  *
- * The crash that motivated it is not ours to fix: Media3's RTSP receiver treats any byte
- * that is not the '$' interleave marker as the start of an RTSP text message and
- * accumulates it into an unbounded ByteArrayOutputStream until it sees CRLF
- * (RtspMessageChannel.parseNextLine). One desynchronised byte on an interleaved TCP
- * connection turns H.264 payload into a "text line" that never terminates, and the heap
- * is gone — 256 MB in the case observed here. There is no length cap in Media3, and the
- * code is byte-identical from 1.4.1 to 1.8.0.
+ * - **Java crashes** (in practice an OutOfMemoryError on the playback thread — see the
+ *   README for how Media3's RTSP stack fills the heap): the uncaught-exception handler
+ *   schedules a restart and kills the process. In-process recovery is not an option with
+ *   the heap gone, so the intent is handed to the system.
+ * - **Native aborts** (SIGABRT in MediaCodec, e.g. "could not create MediaCodec.BufferInfo
+ *   object" on a full heap) skip every Java handler. For those, the wall keeps a restart
+ *   permanently scheduled a couple of minutes ahead and pushes it back every minute while
+ *   it runs ([keepAlive]). If the process vanishes, the alarm fires.
  *
- * Restarting via AlarmManager rather than in-process: the heap is exhausted at that point,
- * so the only reliable move is to hand the intent to the system and die. The pending
- * activity start relies on the same SYSTEM_ALERT_WINDOW exemption that lets BootReceiver
- * launch the wall.
+ * Both rely on the same SYSTEM_ALERT_WINDOW exemption that lets BootReceiver start the
+ * activity from the background.
  */
 object CrashRestart {
 
     private const val TAG = "CamWall"
-    private const val RESTART_DELAY_MS = 3_000L
+    private const val CRASH_RESTART_MS = 3_000L
+    private const val KEEP_ALIVE_RESTART_MS = 150_000L
+
+    private var alarms: AlarmManager? = null
+    private var restart: PendingIntent? = null
 
     fun install(context: Context) {
-        val appContext = context.applicationContext
-        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        // Once per process: every activity re-creation would otherwise wrap another handler.
+        if (restart != null) return
 
+        val appContext = context.applicationContext
+        val intent = Intent(appContext, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        // Built up front: the crash path usually runs with the heap already full.
+        restart = PendingIntent.getActivity(appContext, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        alarms = appContext.getSystemService(AlarmManager::class.java)
+
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
-            // Keep this path allocation-light: it usually runs with the heap already full.
             try {
-                Log.e(TAG, "fatal on ${thread.name}, restarting in ${RESTART_DELAY_MS}ms", error)
+                Log.e(TAG, "fatal on ${thread.name}, restarting in ${CRASH_RESTART_MS}ms", error)
             } catch (ignored: Throwable) {
             }
-            try {
-                val intent = Intent(appContext, MainActivity::class.java)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-                val pending = PendingIntent.getActivity(
-                    appContext, 0, intent,
-                    PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-                )
-                appContext.getSystemService(AlarmManager::class.java)?.set(
-                    AlarmManager.RTC,
-                    System.currentTimeMillis() + RESTART_DELAY_MS,
-                    pending
-                )
-            } catch (e: Throwable) {
-                try {
-                    Log.e(TAG, "could not schedule restart", e)
-                } catch (ignored: Throwable) {
-                }
-            }
+            scheduleRestart(CRASH_RESTART_MS)
             // Let the platform handler record the tombstone before the process goes.
             try {
                 previous?.uncaughtException(thread, error)
@@ -65,6 +58,27 @@ object CrashRestart {
             }
             Process.killProcess(Process.myPid())
             exitProcess(10)
+        }
+    }
+
+    /** Called every minute while the wall is on screen. */
+    fun keepAlive() = scheduleRestart(KEEP_ALIVE_RESTART_MS)
+
+    /** The wall left the screen on purpose (BACK, another app, TV off): don't bring it back. */
+    fun cancel() {
+        val pending = restart ?: return
+        alarms?.cancel(pending)
+    }
+
+    private fun scheduleRestart(delayMs: Long) {
+        val pending = restart ?: return
+        try {
+            alarms?.set(AlarmManager.RTC, System.currentTimeMillis() + delayMs, pending)
+        } catch (e: Throwable) {
+            try {
+                Log.e(TAG, "could not schedule restart", e)
+            } catch (ignored: Throwable) {
+            }
         }
     }
 }

@@ -31,11 +31,8 @@ import kotlin.math.ceil
 import kotlin.math.sqrt
 
 /**
- * Remote control:
- *   D-pad            move the selection between tiles
- *   OK, twice        full screen the selected tile
- *   BACK             leave full screen (ignored in the grid — this is the HOME app)
- *   OK, long press   actions for the selected tile (mute, unlock)
+ * The camera wall: one tile per camera, each with its own ExoPlayer. Remote-control
+ * behaviour is described in the README.
  *
  * Video goes to TextureViews, not SurfaceViews. SurfaceView asks for a hardware overlay
  * plane, and this SoC's compositor mis-assigns buffers when four video planes are live —
@@ -49,20 +46,53 @@ class MainActivity : Activity() {
         const val TAG = "CamWall"
         const val RETRY_BASE_MS = 2_000L
         const val RETRY_MAX_MS = 30_000L
+        const val STALL_MS = 15_000L
+        const val HEARTBEAT_MS = 60_000L
+        const val CONFIG_RETRY_MS = 30_000L
         const val DOUBLE_PRESS_MS = 450L
     }
 
-    private inner class Tile(val camera: Camera, val index: Int) {
-        lateinit var cell: FrameLayout
-        lateinit var texture: TextureView
-        lateinit var label: TextView
+    private inner class Tile(val camera: Camera) {
+        val texture = TextureView(this@MainActivity)
+        val label = TextView(this@MainActivity).apply {
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            setPadding(14, 6, 14, 6)
+            textSize = 12f
+        }
+        val cell = FrameLayout(this@MainActivity).apply {
+            setBackgroundColor(Color.BLACK)
+            isFocusable = true
+            isFocusableInTouchMode = false
+            addView(texture, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(label, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.START))
+            setOnFocusChangeListener { _, _ -> paintBorder(this@Tile) }
+        }
         var row = 0
         var col = 0
 
         var player: ExoPlayer? = null
         var muted = !camera.audio
         var failures = 0
+        /** Why the stream is down, shown on the label until it plays again. */
+        var error: String? = null
         val retry = Runnable { start() }
+
+        /**
+         * Media3's RTSP stack can stall without ever raising an error: a server that never
+         * answers, or an RTP data gap that ends the stream silently. The session is not torn
+         * down either, so a stalled tile both freezes and keeps queueing packets nothing
+         * reads — the heap fills until the process dies. Any stall that outlasts STALL_MS
+         * is treated as a failure, which releases the player and frees all of that.
+         */
+        val stallCheck = Runnable { fail("STALLED") }
+
+        init {
+            renderLabel()
+        }
 
         fun start() {
             stop()
@@ -74,26 +104,41 @@ class MainActivity : Activity() {
                         .build()
                 )
                 .build()
-
+            // Set before prepare(): prepare() delivers the first state change synchronously,
+            // and the listener ignores players that are not this tile's current one.
+            player = p
+            applyMute()
             p.setVideoTextureView(texture)
-            p.volume = if (muted) 0f else 1f
             p.addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
+                    // release() reports its own timeout through here; a player we already
+                    // dropped must not schedule a reconnect.
+                    if (p !== player) return
                     Log.e(TAG, "${camera.name}: ${error.errorCodeName}", error)
-                    setLabel(getString(R.string.label_error, camera.name, error.errorCodeName))
-                    scheduleRetry()
+                    fail(error.errorCodeName)
                 }
 
                 override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_READY) {
-                        failures = 0
-                        setLabel(camera.name)
+                    if (p !== player) return
+                    when (state) {
+                        Player.STATE_READY -> {
+                            handler.removeCallbacks(stallCheck)
+                            failures = 0
+                            error = null
+                            renderLabel()
+                        }
+                        Player.STATE_BUFFERING -> {
+                            handler.removeCallbacks(stallCheck)
+                            handler.postDelayed(stallCheck, STALL_MS)
+                        }
+                        Player.STATE_ENDED -> fail("ENDED")
+                        // Reached after an error, which onPlayerError already handles.
+                        Player.STATE_IDLE -> Unit
                     }
                 }
             })
 
-            // Interleaved RTP over the RTSP TCP connection; see Camera.tcp for the
-            // trade-off against Media3's unbounded RTSP line parser.
+            // Interleaved RTP over the RTSP TCP connection; see Camera.tcp for the trade-off.
             val source = RtspMediaSource.Factory()
                 .setForceUseRtpTcp(camera.tcp)
                 .setTimeoutMs(10_000)
@@ -102,47 +147,65 @@ class MainActivity : Activity() {
             p.setMediaSource(source)
             p.prepare()
             p.playWhenReady = true
-            player = p
         }
 
-        fun setLabel(text: String) {
-            val moving = if (this === movingTile) "  " + getString(R.string.label_moving) else ""
-            label.text = (if (muted) text else "$text  ♪") + moving
-        }
-
-        fun refreshLabel() = setLabel(camera.name)
-
-        fun toggleMute(): Boolean {
-            muted = !muted
-            player?.volume = if (muted) 0f else 1f
-            setLabel(camera.name)
-            return muted
-        }
-
-        fun scheduleRetry() {
+        fun fail(reason: String) {
+            handler.removeCallbacks(stallCheck)
+            error = reason
+            renderLabel()
             failures++
             val delay = minOf(RETRY_BASE_MS * failures, RETRY_MAX_MS)
-            Log.i(TAG, "${camera.name}: reconnecting in ${delay}ms (attempt $failures)")
+            Log.i(TAG, "${camera.name}: $reason, reconnecting in ${delay}ms (attempt $failures)")
             handler.removeCallbacks(retry)
             handler.postDelayed(retry, delay)
         }
 
+        fun renderLabel() {
+            val reason = error
+            var text = if (reason == null) camera.name
+                       else getString(R.string.label_error, camera.name, reason)
+            if (!muted) text += "  ♪"
+            if (this === movingTile) text += "  " + getString(R.string.label_moving)
+            label.text = text
+        }
+
+        fun toggleMute(): Boolean {
+            muted = !muted
+            applyMute()
+            renderLabel()
+            return muted
+        }
+
+        private fun applyMute() {
+            player?.volume = if (muted) 0f else 1f
+        }
+
         fun stop() {
-            handler.removeCallbacks(retry)
-            player?.release()
+            val p = player
             player = null
+            p?.release()
+            handler.removeCallbacks(retry)
+            handler.removeCallbacks(stallCheck)
         }
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private val tiles = ArrayList<Tile>()
-    private lateinit var grid: GridLayout
     private var rows = 1
     private var cols = 1
-    private var fullscreenIndex = -1
+    private var fullscreenTile: Tile? = null
+    private var movingTile: Tile? = null
     private var lastCenterUp = 0L
     private var longPressFired = false
-    private var movingTile: Tile? = null
+
+    private val reloadConfig = Runnable { recreate() }
+
+    private val heartbeat = object : Runnable {
+        override fun run() {
+            CrashRestart.keepAlive()
+            handler.postDelayed(this, HEARTBEAT_MS)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -150,55 +213,31 @@ class MainActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
         hideSystemUi()
+        val root = findViewById<FrameLayout>(R.id.root)
 
         val cameras = orderedCameras(CameraConfig.load(this))
-        cols = ceil(sqrt(cameras.size.toDouble())).toInt().coerceAtLeast(1)
-        rows = ceil(cameras.size / cols.toDouble()).toInt().coerceAtLeast(1)
+        if (cameras.isEmpty()) {
+            // Say so on screen rather than show cameras that can never connect. Storage may
+            // not be mounted yet right after boot, so onStart tries again shortly.
+            root.addView(TextView(this).apply {
+                text = getString(R.string.label_no_cameras)
+                setTextColor(Color.WHITE)
+                textSize = 20f
+                gravity = Gravity.CENTER
+            }, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            return
+        }
 
-        grid = GridLayout(this).apply {
+        cols = ceil(sqrt(cameras.size.toDouble())).toInt()
+        rows = ceil(cameras.size / cols.toDouble()).toInt()
+        val grid = GridLayout(this).apply {
             columnCount = cols
             rowCount = rows
             setBackgroundColor(Color.BLACK)
         }
-
         cameras.forEachIndexed { i, cam ->
-            val tile = Tile(cam, i)
-            tile.texture = TextureView(this)
-            tile.label = TextView(this).apply {
-                text = cam.name
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.argb(150, 0, 0, 0))
-                setPadding(14, 6, 14, 6)
-                textSize = 12f
-            }
-            tile.cell = FrameLayout(this).apply {
-                setBackgroundColor(Color.BLACK)
-                isFocusable = true
-                isFocusableInTouchMode = false
-                addView(
-                    tile.texture,
-                    FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                )
-                addView(
-                    tile.label,
-                    FrameLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT,
-                        Gravity.TOP or Gravity.START
-                    )
-                )
-                setOnFocusChangeListener { v, hasFocus ->
-                    v.foreground = when {
-                        tile === movingTile -> selectionBorder(moving = true)
-                        hasFocus -> selectionBorder()
-                        else -> null
-                    }
-                }
-            }
-
+            val tile = Tile(cam)
             tile.row = i / cols
             tile.col = i % cols
             val params = GridLayout.LayoutParams(
@@ -211,20 +250,25 @@ class MainActivity : Activity() {
             grid.addView(tile.cell, params)
             tiles.add(tile)
         }
-
-        findViewById<FrameLayout>(R.id.root).addView(
-            grid,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        tiles.firstOrNull()?.cell?.requestFocus()
+        root.addView(grid, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        tiles.first().cell.requestFocus()
         Log.i(TAG, "wall built: ${cameras.size} cameras in ${rows}x$cols")
     }
 
-    private fun selectionBorder(moving: Boolean = false) = GradientDrawable().apply {
-        setStroke(if (moving) 6 else 4, Color.parseColor(if (moving) "#FFB300" else "#3DDC84"))
+    /** Green for the selected tile, amber for the one being moved. */
+    private fun paintBorder(tile: Tile) {
+        val isMoving = tile === movingTile
+        val isSelected = tile.cell.hasFocus()
+        tile.cell.foreground = when {
+            isMoving -> border(width = 6, color = "#FFB300")
+            isSelected -> border(width = 4, color = "#3DDC84")
+            else -> null
+        }
+    }
+
+    private fun border(width: Int, color: String) = GradientDrawable().apply {
+        setStroke(width, Color.parseColor(color))
         setColor(Color.TRANSPARENT)
     }
 
@@ -258,16 +302,16 @@ class MainActivity : Activity() {
 
     private fun startMove(tile: Tile) {
         movingTile = tile
-        tile.cell.foreground = selectionBorder(moving = true)
-        tile.refreshLabel()
+        paintBorder(tile)
+        tile.renderLabel()
         toast(getString(R.string.toast_move_hint, tile.camera.name))
     }
 
     private fun endMove() {
         val tile = movingTile ?: return
         movingTile = null
-        tile.cell.foreground = if (tile.cell.hasFocus()) selectionBorder() else null
-        tile.refreshLabel()
+        paintBorder(tile)
+        tile.renderLabel()
         saveOrder()
     }
 
@@ -293,8 +337,12 @@ class MainActivity : Activity() {
 
     // ---- full screen -------------------------------------------------------
 
+    private fun toggleFullscreen(tile: Tile) {
+        if (fullscreenTile === tile) exitFullscreen() else enterFullscreen(tile)
+    }
+
     private fun enterFullscreen(tile: Tile) {
-        fullscreenIndex = tile.index
+        fullscreenTile = tile
         tiles.forEach { it.cell.visibility = if (it === tile) View.VISIBLE else View.GONE }
         val lp = tile.cell.layoutParams as GridLayout.LayoutParams
         lp.rowSpec = GridLayout.spec(0, rows, 1f)
@@ -305,10 +353,10 @@ class MainActivity : Activity() {
     }
 
     private fun exitFullscreen() {
-        val tile = tiles.getOrNull(fullscreenIndex) ?: return
+        val tile = fullscreenTile ?: return
+        fullscreenTile = null
         applyPosition(tile)
         tiles.forEach { it.cell.visibility = View.VISIBLE }
-        fullscreenIndex = -1
         tile.cell.requestFocus()
         Log.i(TAG, "back to grid")
     }
@@ -319,10 +367,10 @@ class MainActivity : Activity() {
         val labels = ArrayList<String>()
         val actions = ArrayList<() -> Unit>()
 
+        val isFullscreen = fullscreenTile === tile
         labels.add(getString(
-            if (fullscreenIndex == tile.index) R.string.action_back_to_grid
-            else R.string.action_fullscreen))
-        actions.add { if (fullscreenIndex == tile.index) exitFullscreen() else enterFullscreen(tile) }
+            if (isFullscreen) R.string.action_back_to_grid else R.string.action_fullscreen))
+        actions.add { toggleFullscreen(tile) }
 
         labels.add(getString(if (tile.muted) R.string.action_unmute else R.string.action_mute))
         actions.add {
@@ -381,49 +429,43 @@ class MainActivity : Activity() {
                 KeyEvent.KEYCODE_DPAD_RIGHT -> return moveBy(0, 1)
             }
         }
-        if (isCenter(keyCode)) {
-            if (event.repeatCount == 0) {
-                event.startTracking()
-                longPressFired = false
-            }
-            return true
+        if (!isCenter(keyCode)) return super.onKeyDown(keyCode, event)
+        if (event.repeatCount == 0) {
+            event.startTracking()
+            longPressFired = false
         }
-        return super.onKeyDown(keyCode, event)
+        return true
     }
 
     override fun onKeyLongPress(keyCode: Int, event: KeyEvent): Boolean {
-        if (isCenter(keyCode)) {
-            focusedTile()?.let { showActions(it) }
-            longPressFired = true
-            return true
-        }
-        return super.onKeyLongPress(keyCode, event)
+        if (!isCenter(keyCode)) return super.onKeyLongPress(keyCode, event)
+        focusedTile()?.let { showActions(it) }
+        longPressFired = true
+        return true
     }
 
+    /** OK confirms a move, ends a long press, or — pressed twice — toggles full screen. */
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
-        if (isCenter(keyCode) && movingTile != null) {
+        if (!isCenter(keyCode)) return super.onKeyUp(keyCode, event)
+        if (movingTile != null) {
             endMove()
             longPressFired = false
             lastCenterUp = 0L
             return true
         }
-        if (isCenter(keyCode)) {
-            if (longPressFired) {
-                longPressFired = false
-                return true
-            }
-            val now = System.currentTimeMillis()
-            if (now - lastCenterUp <= DOUBLE_PRESS_MS) {
-                lastCenterUp = 0L
-                focusedTile()?.let {
-                    if (fullscreenIndex == it.index) exitFullscreen() else enterFullscreen(it)
-                }
-            } else {
-                lastCenterUp = now
-            }
+        if (longPressFired) {
+            longPressFired = false
             return true
         }
-        return super.onKeyUp(keyCode, event)
+        val now = System.currentTimeMillis()
+        val isDoublePress = now - lastCenterUp <= DOUBLE_PRESS_MS
+        if (!isDoublePress) {
+            lastCenterUp = now
+            return true
+        }
+        lastCenterUp = 0L
+        focusedTile()?.let { toggleFullscreen(it) }
+        return true
     }
 
     /**
@@ -434,7 +476,7 @@ class MainActivity : Activity() {
     override fun onBackPressed() {
         when {
             movingTile != null -> endMove()
-            fullscreenIndex >= 0 -> exitFullscreen()
+            fullscreenTile != null -> exitFullscreen()
             else -> finish()
         }
     }
@@ -444,9 +486,14 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         tiles.forEach { it.start() }
+        if (tiles.isEmpty()) handler.postDelayed(reloadConfig, CONFIG_RETRY_MS)
+        heartbeat.run()
     }
 
     override fun onStop() {
+        handler.removeCallbacks(heartbeat)
+        handler.removeCallbacks(reloadConfig)
+        CrashRestart.cancel()
         tiles.forEach { it.stop() }
         super.onStop()
     }
