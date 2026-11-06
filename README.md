@@ -81,13 +81,23 @@ plain `adb shell screencap` now shows exactly what the TV shows.
 ## Setup
 
 One-time host toolchain. **Build on JDK 17 or 21** — AGP is not validated on newer JDKs,
-and Gradle 8.9 does not run on Java 23+. If your default `java` is newer, either set
+and Gradle 8.14 does not run on Java 25. If your default `java` is newer, either set
 `JAVA_HOME` or let `deploy.sh` find a supported one:
 
     sudo pacman -S jdk21-openjdk        # system default may stay newer
     export JAVA_HOME=/usr/lib/jvm/java-21-openjdk
     ~/Android/Sdk/cmdline-tools/latest/bin/sdkmanager \
-        "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+        "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+Media3 1.11 requires `compileSdk` 36, hence AGP 8.11 and Kotlin 2.1. `targetSdk` stays
+at 34, so runtime behaviour on the device does not change with the toolchain.
+
+**Signing.** Every build is signed with `wall.keystore` at the repo root (a plain debug
+key, `android`/`androiddebugkey`/`android`, gitignored). The installed wall carries that
+key, and Android refuses an update signed with any other one
+(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`); getting past that means uninstalling, which wipes
+the saved layout and the boot-start grant. Copy the file to any machine that builds the
+wall rather than letting each machine's own `~/.android/debug.keystore` sign it.
 
 On the device: Settings -> System -> About -> tap *Android TV OS build* 7x,
 then System -> Developer options -> **ADB debugging** on.

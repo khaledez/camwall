@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "net.khaledez.camwall"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "net.khaledez.camwall"
@@ -15,11 +15,26 @@ android {
         versionName = "1.0"
     }
 
+    // The installed wall is signed with this key; an APK signed with any other key cannot
+    // update it (INSTALL_FAILED_UPDATE_INCOMPATIBLE) without an uninstall that wipes the
+    // saved layout. So every build, on every machine, uses the keystore kept next to the
+    // project. It is a plain debug key (standard "android" passwords), gitignored.
+    signingConfigs {
+        create("wall") {
+            storeFile = rootProject.file("wall.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("wall")
+        }
         release {
             isMinifyEnabled = false
-            // Signed with the debug key so `adb install -r` works without a keystore dance.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("wall")
         }
     }
 
@@ -31,7 +46,7 @@ android {
 }
 
 dependencies {
-    val media3 = "1.4.1"
+    val media3 = "1.11.1"
     implementation("androidx.media3:media3-exoplayer:$media3")
     implementation("androidx.media3:media3-exoplayer-rtsp:$media3")
     implementation("androidx.media3:media3-common:$media3")
